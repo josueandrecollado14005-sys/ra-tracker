@@ -367,7 +367,7 @@ with t_semana:
     st.caption("Pon cuántas horas planificas trabajar cada día. "
                "La app lo compara con lo que registres. El domingo muestra el cierre.")
 
-   with t_semana:
+with t_semana:
     st.markdown('<div class="section-header">Define tu plan semanal</div>', unsafe_allow_html=True)
     st.caption("Pon cuántas horas planificas trabajar cada día. La app lo compara con lo que registres. El domingo muestra el cierre.")
 
