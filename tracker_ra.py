@@ -290,14 +290,13 @@ with t_reg:
         h_ini = st.time_input("Hora inicio", value=time(7,0))
         h_fin = st.time_input("Hora fin",    value=time(9,0))
 
-    desc = st.text_area("Descripción", height=80,
-                         placeholder="Ej: Debugging merge ubigeo MFI 2002-2012")
+    desc = st.text_area("Descripción", height=80, placeholder="Ej: Debugging merge ubigeo MFI 2002-2012")
 
-    dt_i  = datetime.combine(fecha, h_ini)
-dt_f  = datetime.combine(fecha, h_fin)
-    mins  = max(int((dt_f - dt_i).total_seconds() / 60), 0)
+    dt_i = datetime.combine(fecha, h_ini)
+    dt_f = datetime.combine(fecha, h_fin)
+    mins = max(int((dt_f - dt_i).total_seconds() / 60), 0)
     horas = round(mins / 60, 3)
-    sem   = int(fecha.isocalendar()[1])
+    sem = int(fecha.isocalendar()[1])
 
     # Preview vs plan del día
     plan_hoy = planes_all.get(sem, {}).get(dia_sem, None)
