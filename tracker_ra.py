@@ -177,6 +177,32 @@ def sessions_to_df(sessions):
     df["Horas"] = df["Horas"].apply(parse_h)
     df["Minutos"] = pd.to_numeric(df.get("Minutos",0), errors="coerce").fillna(0)
     df["Semana"] = pd.to_numeric(df["Semana"], errors="coerce").fillna(0).astype(int)
+
+    # --- NUEVA LÓGICA: Deducir el Día a partir de la Fecha ---
+    dias_es = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    
+    def extraer_dia(fila):
+        # 1. Si el registro ya tiene el día guardado (ej: sesiones nuevas creadas en la app)
+        dia_actual = str(fila.get("Dia", "")).strip()
+        if dia_actual and dia_actual.lower() not in ["nan", "none", ""]:
+            d = dia_actual.capitalize()
+            return d.replace("Miercoles", "Miércoles").replace("Sabado", "Sábado")
+        
+        # 2. Si no tiene día (los del CSV), lo calculamos desde "Fecha" (ej: "04/05")
+        fecha_str = str(fila.get("Fecha", "")).strip()
+        if "/" in fecha_str:
+            try:
+                # Le agregamos el año 2026 para que el sistema sepa calcular el día exacto
+                if fecha_str.count("/") == 1:
+                    fecha_str += "/2026" 
+                dt = pd.to_datetime(fecha_str, format="%d/%m/%Y")
+                return dias_es[dt.weekday()]
+            except:
+                pass
+        return "Sin Día"
+        
+    df["Dia"] = df.apply(extraer_dia, axis=1)
+    
     return df
 
 def is_domingo():
