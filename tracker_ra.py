@@ -367,7 +367,11 @@ with t_semana:
     st.caption("Pon cuántas horas planificas trabajar cada día. "
                "La app lo compara con lo que registres. El domingo muestra el cierre.")
 
-   sem_w = st.number_input("Semana", min_value=1, max_value=60, value=int(get_now_peru().isocalendar()[1]), key="sem_w")
+   with t_semana:
+    st.markdown('<div class="section-header">Define tu plan semanal</div>', unsafe_allow_html=True)
+    st.caption("Pon cuántas horas planificas trabajar cada día. La app lo compara con lo que registres. El domingo muestra el cierre.")
+
+    sem_w = st.number_input("Semana", min_value=1, max_value=60, value=int(get_now_peru().isocalendar()[1]), key="sem_w")
 
     # Cargar plan existente si hay
     plan_prev = planes_all.get(sem_w, {d: 0.0 for d in DIAS})
