@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date, time
+import pytz 
 import json
 
 st.set_page_config(page_title="RA Tracker", page_icon="📊",
@@ -32,6 +33,9 @@ sb = get_supabase()
 USE_DB = sb is not None
 
 # ─── CONSTANTES ───────────────────────────────────────────────────────────────
+def get_now_peru():
+    tz_peru = pytz.timezone('America/Lima')
+    return datetime.now(tz_peru)
 DIAS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
 
 DEFAULT_PROYECTOS   = ["Fintech","MFI","LRC","Otros"]
@@ -206,7 +210,7 @@ def sessions_to_df(sessions):
     return df
 
 def is_domingo():
-    return datetime.today().weekday() == 6   # 0=lun … 6=dom
+    return get_now_peru().weekday() == 6   # 0=lun … 6=dom
 
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
@@ -276,10 +280,9 @@ with t_reg:
                 unsafe_allow_html=True)
     c1,c2,c3 = st.columns(3)
     with c1:
-        fecha    = st.date_input("Fecha", value=date.today())
+      fecha    = st.date_input("Fecha", value=get_now_peru().date())
         proyecto = st.selectbox("Proyecto", proyectos)
-        dia_sem  = st.selectbox("Día", DIAS,
-                                 index=min(datetime.today().weekday(), 6))
+        dia_sem  = st.selectbox("Día", DIAS, index=min(get_now_peru().weekday(), 6))
     with c2:
         tipo   = st.selectbox("Tipo de tarea", tipos)
         estado = st.selectbox("Estado", ["Terminado","En Proceso","Bloqueado"])
@@ -290,8 +293,8 @@ with t_reg:
     desc = st.text_area("Descripción", height=80,
                          placeholder="Ej: Debugging merge ubigeo MFI 2002-2012")
 
-    dt_i  = datetime.combine(date.today(), h_ini)
-    dt_f  = datetime.combine(date.today(), h_fin)
+    dt_i  = datetime.combine(fecha, h_ini)
+dt_f  = datetime.combine(fecha, h_fin)
     mins  = max(int((dt_f - dt_i).total_seconds() / 60), 0)
     horas = round(mins / 60, 3)
     sem   = int(fecha.isocalendar()[1])
@@ -365,8 +368,7 @@ with t_semana:
     st.caption("Pon cuántas horas planificas trabajar cada día. "
                "La app lo compara con lo que registres. El domingo muestra el cierre.")
 
-    sem_w = st.number_input("Semana", min_value=1, max_value=60,
-                             value=int(datetime.now().isocalendar()[1]), key="sem_w")
+   sem_w = st.number_input("Semana", min_value=1, max_value=60, value=int(get_now_peru().isocalendar()[1]), key="sem_w")
 
     # Cargar plan existente si hay
     plan_prev = planes_all.get(sem_w, {d: 0.0 for d in DIAS})
