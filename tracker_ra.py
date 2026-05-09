@@ -281,8 +281,8 @@ with t_reg:
     c1,c2,c3 = st.columns(3)
     with c1:
       fecha    = st.date_input("Fecha", value=get_now_peru().date())
-        proyecto = st.selectbox("Proyecto", proyectos)
-        dia_sem  = st.selectbox("Día", DIAS, index=min(get_now_peru().weekday(), 6))
+      proyecto = st.selectbox("Proyecto", proyectos)
+      dia_sem  = st.selectbox("Día", DIAS, index=min(get_now_peru().weekday(), 6))
     with c2:
         tipo   = st.selectbox("Tipo de tarea", tipos)
         estado = st.selectbox("Estado", ["Terminado","En Proceso","Bloqueado"])
