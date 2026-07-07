@@ -921,3 +921,4 @@ create table config (
   clave text primary key,
   valor text
 );
+""")
