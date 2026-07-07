@@ -569,28 +569,29 @@ with t_semana:
         with col_g:
             prog_pct = (tr / tp * 100) if tp > 0 else 0
             
-            # Gauge condicional: protege contra anchos de barra cero si tp es 0
+            # Gauge condicional: protege contra anchos de barra cero y colores inválidos
             gauge_dict = {
-                "axis": {"range": [0, max(tp, tr, 1)], "tickcolor": "#666"},
+                "axis": {"range": [0, float(max(tp, tr, 1))], "tickcolor": "#666"},
                 "bar": {"color": "#185FA5"},
                 "bgcolor": "rgba(0,0,0,0)",
                 "borderwidth": 0
             }
             if tp > 0:
                 gauge_dict["steps"] = [
-                    {"range": [0, tp * 0.7], "color": "#2a2a3e"},
-                    {"range": [tp * 0.7, tp], "color": "#3C348940"}
+                    {"range": [0, float(tp * 0.7)], "color": "#2a2a3e"},
+                    # Reemplazamos el Hex de 8 caracteres por RGBA para evitar el ValueError
+                    {"range": [float(tp * 0.7), float(tp)], "color": "rgba(60, 52, 137, 0.25)"}
                 ]
                 gauge_dict["threshold"] = {
                     "line": {"color": "#3B6D11", "width": 3},
-                    "thickness": 0.85, "value": tp
+                    "thickness": 0.85, "value": float(tp)
                 }
 
             fig_gauge = go.Figure(go.Indicator(
                 mode="gauge+number+delta",
-                value=round(tr, 1),
+                value=float(tr),
                 number={"suffix": " h", "font": {"color": "#e0e0e0"}},
-                delta={"reference": round(tp, 1), "increasing": {"color": "#A32D2D"},
+                delta={"reference": float(tp), "increasing": {"color": "#A32D2D"},
                        "decreasing": {"color": "#3B6D11"},
                        "position": "bottom"},
                 title={"text": f"Progreso: {prog_pct:.0f}% del plan",
@@ -599,7 +600,6 @@ with t_semana:
             ))
             fig_gauge.update_layout(**CHART, height=260)
             st.plotly_chart(fig_gauge, use_container_width=True)
-
         with col_k:
             st.markdown("<br>", unsafe_allow_html=True)
             k1, k2 = st.columns(2)
