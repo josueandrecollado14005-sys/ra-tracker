@@ -1,8 +1,10 @@
 """
-RA Productivity Tracker — v3
-- Plan semanal personalizado por semana
-- Comparación diaria plan vs real
-- Cierre dominical automático
+RA Productivity Tracker — v4
+- Plan semanal personalizado por semana (modo horas rápidas o horario por bloques)
+- Rango de fechas legible por semana ISO (Semana del X al Y de <mes> de <año>)
+- Horario visual (grilla día × hora) + timeline tipo Gantt del plan
+- Medidor/gauge de progreso semanal (real vs plan)
+- Comparación diaria plan vs real · Cierre dominical automático
 - Proyectos y tipos de tarea configurables
 - Persistencia en Supabase (funciona en todos los dispositivos)
 """
@@ -11,8 +13,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date, time
-import pytz 
+from datetime import datetime, date, time, timedelta
+import pytz
 import json
 
 st.set_page_config(page_title="RA Tracker", page_icon="📊",
@@ -36,7 +38,12 @@ USE_DB = sb is not None
 def get_now_peru():
     tz_peru = pytz.timezone('America/Lima')
     return datetime.now(tz_peru)
+
 DIAS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
+MESES = ["enero","febrero","marzo","abril","mayo","junio",
+         "julio","agosto","septiembre","octubre","noviembre","diciembre"]
+# Franjas horarias de 06:00 a 23:00 (bloques de 1h) para el horario detallado
+FRANJAS = [f"{h:02d}:00" for h in range(6, 24)]
 
 DEFAULT_PROYECTOS   = ["Fintech","MFI","LRC","Otros"]
 DEFAULT_TIPOS       = [
@@ -62,6 +69,9 @@ st.markdown("""<style>
   padding:2px 10px;border-radius:20px;display:inline-block;margin:2px}
 .db-ok{color:#3B6D11;font-size:12px;font-weight:600}
 .db-no{color:#A32D2D;font-size:12px;font-weight:600}
+.week-banner{background:linear-gradient(90deg,#185FA530,#3C348920);
+  border:1px solid #185FA540;border-radius:10px;padding:10px 16px;margin:6px 0 14px}
+.week-banner b{color:#B5D4F4;font-size:16px}
 </style>""", unsafe_allow_html=True)
 
 
@@ -70,7 +80,7 @@ st.markdown("""<style>
 def _init_state():
     defaults = {
         "sessions":    [],    # lista de dicts con registros
-        "planes":      {},    # {semana: {dia: horas_plan}}
+        "planes":      {},    # {semana: {...plan...}}
         "proyectos":   list(DEFAULT_PROYECTOS),
         "tipos":       list(DEFAULT_TIPOS),
     }
@@ -131,32 +141,88 @@ def save_plan(semana: int, datos: dict):
     st.session_state.planes[semana] = datos
 
 
-# ── Config (proyectos y tipos) ─────────────────────────────────────────────────
-def load_config():
-    if USE_DB:
-        try:
-            r = sb.table("config").select("*").execute()
-            cfg = {}
-            for row in (r.data or []):
-                cfg[row["clave"]] = json.loads(row["valor"])
-            return (cfg.get("proyectos", DEFAULT_PROYECTOS),
-                    cfg.get("tipos",     DEFAULT_TIPOS))
-        except: pass
-    return st.session_state.proyectos, st.session_state.tipos
+# ── Normalización de planes (compatibilidad con formato antiguo) ──────────────
+# Formato NUEVO: {"horas": {dia: h}, "bloques": {dia: [[ini,fin],...]}, "modo": "..."}
+# Formato ANTIGUO (legacy): {dia: horas}  (dict plano)
+def _norm_plan(plan):
+    if not plan:
+        return {"horas": {}, "bloques": {}, "modo": "rapido"}
+    if isinstance(plan, dict) and "horas" in plan and isinstance(plan.get("horas"), dict):
+        return {"horas": plan.get("horas", {}) or {},
+                "bloques": plan.get("bloques", {}) or {},
+                "modo": plan.get("modo", "rapido")}
+    # legacy: {dia: horas}
+    return {"horas": {k: float(v) for k, v in plan.items() if k in DIAS},
+            "bloques": {}, "modo": "rapido"}
 
-def save_config(proyectos, tipos):
-    if USE_DB:
-        try:
-            sb.table("config").upsert(
-                {"clave":"proyectos","valor":json.dumps(proyectos)},
-                on_conflict="clave").execute()
-            sb.table("config").upsert(
-                {"clave":"tipos","valor":json.dumps(tipos)},
-                on_conflict="clave").execute()
-            return
-        except: pass
-    st.session_state.proyectos = proyectos
-    st.session_state.tipos     = tipos
+def plan_horas_dia(plan, dia):
+    return float(_norm_plan(plan)["horas"].get(dia, 0.0))
+
+def plan_total_h(plan):
+    return float(sum(_norm_plan(plan)["horas"].values()))
+
+
+# ── Rango de fechas de una semana ISO ─────────────────────────────────────────
+def rango_semana(sem, year):
+    """Devuelve (lunes, domingo, texto legible en español) o (None,None,'') si es inválida."""
+    try:
+        lun = date.fromisocalendar(int(year), int(sem), 1)
+        dom = date.fromisocalendar(int(year), int(sem), 7)
+    except (ValueError, TypeError):
+        return None, None, ""
+    if lun.month == dom.month:
+        txt = f"{lun.day} al {dom.day} de {MESES[lun.month-1]} de {lun.year}"
+    elif lun.year == dom.year:
+        txt = (f"{lun.day} de {MESES[lun.month-1]} al "
+               f"{dom.day} de {MESES[dom.month-1]} de {lun.year}")
+    else:
+        txt = (f"{lun.day} de {MESES[lun.month-1]} {lun.year} al "
+               f"{dom.day} de {MESES[dom.month-1]} {dom.year}")
+    return lun, dom, txt
+
+
+# ── Conversión grilla <-> bloques ─────────────────────────────────────────────
+def bloques_a_grid(bloques):
+    """{dia:[[ini,fin]]} -> {dia:{'06:00':bool,...}}"""
+    grid = {dia: {f: False for f in FRANJAS} for dia in DIAS}
+    for dia, segs in (bloques or {}).items():
+        if dia not in grid:
+            continue
+        for seg in segs:
+            try:
+                a, b = int(seg[0]), int(seg[1])
+            except Exception:
+                continue
+            for h in range(a, b):
+                key = f"{h:02d}:00"
+                if key in grid[dia]:
+                    grid[dia][key] = True
+    return grid
+
+def grid_a_bloques(df_grid):
+    """DataFrame(index=FRANJAS, columns=DIAS, bool) -> (bloques, horas_por_dia)"""
+    bloques, horas = {}, {}
+    for dia in DIAS:
+        segs, start, last, cnt = [], None, None, 0
+        for f in FRANJAS:
+            h = int(f[:2])
+            try:
+                on = bool(df_grid.at[f, dia]) if dia in df_grid.columns else False
+            except Exception:
+                on = False
+            if on:
+                cnt += 1
+                if start is None:
+                    start = h
+                last = h
+            else:
+                if start is not None:
+                    segs.append([start, last + 1]); start = None
+        if start is not None:
+            segs.append([start, last + 1])
+        bloques[dia] = segs
+        horas[dia] = float(cnt)   # cada franja marcada = 1 hora
+    return bloques, horas
 
 
 def parse_h(v):
@@ -182,31 +248,25 @@ def sessions_to_df(sessions):
     df["Minutos"] = pd.to_numeric(df.get("Minutos",0), errors="coerce").fillna(0)
     df["Semana"] = pd.to_numeric(df["Semana"], errors="coerce").fillna(0).astype(int)
 
-    # --- NUEVA LÓGICA: Deducir el Día a partir de la Fecha ---
     dias_es = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-    
+
     def extraer_dia(fila):
-        # 1. Si el registro ya tiene el día guardado (ej: sesiones nuevas creadas en la app)
         dia_actual = str(fila.get("Dia", "")).strip()
         if dia_actual and dia_actual.lower() not in ["nan", "none", ""]:
             d = dia_actual.capitalize()
             return d.replace("Miercoles", "Miércoles").replace("Sabado", "Sábado")
-        
-        # 2. Si no tiene día (los del CSV), lo calculamos desde "Fecha" (ej: "04/05")
         fecha_str = str(fila.get("Fecha", "")).strip()
         if "/" in fecha_str:
             try:
-                # Le agregamos el año 2026 para que el sistema sepa calcular el día exacto
                 if fecha_str.count("/") == 1:
-                    fecha_str += "/2026" 
+                    fecha_str += "/2026"
                 dt = pd.to_datetime(fecha_str, format="%d/%m/%Y")
                 return dias_es[dt.weekday()]
             except:
                 pass
         return "Sin Día"
-        
+
     df["Dia"] = df.apply(extraer_dia, axis=1)
-    
     return df
 
 def is_domingo():
@@ -225,7 +285,6 @@ with st.sidebar:
         st.caption("Configura Supabase en secrets.toml para sincronizar entre dispositivos.")
 
     st.markdown("---")
-    # Importar CSV legacy
     up = st.file_uploader("Importar CSV antiguo", type=["csv"])
     if up:
         df_imp = pd.read_csv(up)
@@ -261,6 +320,32 @@ with st.sidebar:
 
 # ─── HEADER ───────────────────────────────────────────────────────────────────
 st.markdown("# RA Productivity Tracker")
+
+def load_config():
+    if USE_DB:
+        try:
+            r = sb.table("config").select("*").execute()
+            cfg = {}
+            for row in (r.data or []):
+                cfg[row["clave"]] = json.loads(row["valor"])
+            return (cfg.get("proyectos", DEFAULT_PROYECTOS),
+                    cfg.get("tipos",     DEFAULT_TIPOS))
+        except: pass
+    return st.session_state.proyectos, st.session_state.tipos
+
+def save_config(proyectos, tipos):
+    if USE_DB:
+        try:
+            sb.table("config").upsert(
+                {"clave":"proyectos","valor":json.dumps(proyectos)},
+                on_conflict="clave").execute()
+            sb.table("config").upsert(
+                {"clave":"tipos","valor":json.dumps(tipos)},
+                on_conflict="clave").execute()
+            return
+        except: pass
+    st.session_state.proyectos = proyectos
+    st.session_state.tipos     = tipos
 
 proyectos, tipos = load_config()
 planes_all = load_planes()
@@ -298,11 +383,10 @@ with t_reg:
     horas = round(mins / 60, 3)
     sem = int(fecha.isocalendar()[1])
 
-    # Preview vs plan del día
-    plan_hoy = planes_all.get(sem, {}).get(dia_sem, None)
+    plan_obj_hoy = planes_all.get(sem, {})
+    plan_hoy = plan_horas_dia(plan_obj_hoy, dia_sem) if plan_obj_hoy else None
     real_hoy_antes = 0.0
     if len(df_all) > 0 and "Semana" in df_all.columns:
-        mask = (df_all["Semana"]==sem) & (df_all.get("Dia","") == dia_sem) if "Dia" in df_all.columns else (df_all["Semana"]==sem)
         real_hoy_antes = df_all[df_all["Semana"]==sem]["Horas"].sum() if len(df_all)>0 else 0
 
     ka,kb,kc,kd = st.columns(4)
@@ -310,7 +394,7 @@ with t_reg:
     kb.metric("Horas", f"{horas:.2f}h")
     kc.metric("Semana", sem)
     if plan_hoy is not None:
-        kd.metric("Plan del día", f"{plan_hoy}h",
+        kd.metric("Plan del día", f"{plan_hoy:g}h",
                   f"Real acum.: {real_hoy_antes:.1f}h")
     else:
         kd.metric("Plan del día", "Sin plan",
@@ -340,7 +424,6 @@ with t_reg:
             st.success(f"✅ {horas:.2f}h · {tipo} · {proyecto}")
             st.rerun()
 
-    # Tabla de registros
     sessions_all = load_sessions()
     df_all = sessions_to_df(sessions_all)
     if len(df_all) > 0:
@@ -359,113 +442,206 @@ with t_reg:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — MI SEMANA (plan + seguimiento diario)
+# TAB 2 — MI SEMANA (plan + horario + seguimiento diario)
 # ══════════════════════════════════════════════════════════════════════════════
 with t_semana:
     st.markdown('<div class="section-header">Define tu plan semanal</div>',
                 unsafe_allow_html=True)
-    st.caption("Pon cuántas horas planificas trabajar cada día. "
-               "La app lo compara con lo que registres. El domingo muestra el cierre.")
 
-with t_semana:
-    st.markdown('<div class="section-header">Define tu plan semanal</div>', unsafe_allow_html=True)
-    st.caption("Pon cuántas horas planificas trabajar cada día. La app lo compara con lo que registres. El domingo muestra el cierre.")
+    col_s, col_y = st.columns([2, 1])
+    with col_s:
+        sem_w = st.number_input("Semana ISO", min_value=1, max_value=53,
+                                value=int(get_now_peru().isocalendar()[1]), key="sem_w")
+    with col_y:
+        año_w = st.number_input("Año", min_value=2020, max_value=2035,
+                                value=int(get_now_peru().year), key="año_w")
 
-    sem_w = st.number_input("Semana", min_value=1, max_value=60, value=int(get_now_peru().isocalendar()[1]), key="sem_w")
+    lun_w, dom_w, txt_rango = rango_semana(sem_w, año_w)
+    if txt_rango:
+        st.markdown(
+            f'<div class="week-banner">📅 <b>Semana del {txt_rango}</b>'
+            f'<br><span style="color:#999;font-size:12px">Semana ISO {sem_w} · {año_w}</span></div>',
+            unsafe_allow_html=True)
 
-    # Cargar plan existente si hay
-    plan_prev = planes_all.get(sem_w, {d: 0.0 for d in DIAS})
+    plan_prev = _norm_plan(planes_all.get(sem_w, {}))
 
-    st.markdown("**Horas planificadas por día:**")
-    cols_d = st.columns(7)
-    plan_nuevo = {}
-    for i, dia in enumerate(DIAS):
-        with cols_d[i]:
-            plan_nuevo[dia] = st.number_input(
-                dia[:3], min_value=0.0, max_value=24.0,
-                value=float(plan_prev.get(dia, 0.0)), step=0.25,
-                key=f"plan_{sem_w}_{dia}")
+    modo = st.radio(
+        "¿Cómo quieres planificar?",
+        ["🗓️ Horario por bloques", "⚡ Horas rápidas por día"],
+        horizontal=True,
+        index=0 if plan_prev.get("modo") == "horario" else 1,
+        key="modo_plan")
 
-    col_save, col_total = st.columns([1,2])
-    with col_save:
-        if st.button("💾 Guardar plan", type="primary"):
-            save_plan(sem_w, plan_nuevo)
-            st.success(f"Plan semana {sem_w} guardado.")
-            st.rerun()
-    with col_total:
-        total_plan = sum(plan_nuevo.values())
-        st.markdown(f"<br>Total planificado: **{total_plan:.1f}h**",
-                    unsafe_allow_html=True)
+    # ── MODO A: HORARIO POR BLOQUES (grilla día × hora) ───────────────────────
+    if modo == "🗓️ Horario por bloques":
+        st.caption("Marca las casillas de las horas que planeas trabajar cada día. "
+                   "Cada casilla = 1 hora. Las horas del día se calculan solas.")
 
-    # ── Comparación diaria plan vs real ───────────────────────────────────────
+        grid = bloques_a_grid(plan_prev["bloques"])
+        df_grid = pd.DataFrame(
+            {dia: [grid[dia][f] for f in FRANJAS] for dia in DIAS},
+            index=FRANJAS)
+
+        edited = st.data_editor(
+            df_grid, use_container_width=True, height=430,
+            key=f"grid_{sem_w}_{año_w}",
+            column_config={d: st.column_config.CheckboxColumn(d[:3], default=False)
+                           for d in DIAS})
+
+        bloques_new, horas_new = grid_a_bloques(edited)
+        total_plan = sum(horas_new.values())
+
+        c_save, c_tot = st.columns([1, 2])
+        with c_save:
+            if st.button("💾 Guardar horario", type="primary"):
+                save_plan(sem_w, {"horas": horas_new, "bloques": bloques_new,
+                                  "modo": "horario"})
+                st.success(f"Horario de la semana {sem_w} guardado.")
+                st.rerun()
+        with c_tot:
+            resumen = " · ".join(f"{d[:3]} {int(horas_new[d])}h"
+                                 for d in DIAS if horas_new[d] > 0) or "sin horas marcadas"
+            st.markdown(f"<br>Total planificado: **{total_plan:.1f}h**  \n"
+                        f"<span style='color:#999;font-size:12px'>{resumen}</span>",
+                        unsafe_allow_html=True)
+
+        # Timeline tipo Gantt del horario planificado (el "horario como tal")
+        if total_plan > 0 and lun_w is not None:
+            filas = []
+            for i, dia in enumerate(DIAS):
+                fecha_dia = lun_w + timedelta(days=i)
+                base = datetime.combine(fecha_dia, time(0, 0))
+                for seg in bloques_new.get(dia, []):
+                    filas.append(dict(
+                        Día=dia,
+                        Inicio=base + timedelta(hours=seg[0]),
+                        Fin=base + timedelta(hours=seg[1]),
+                        Bloque=f"{seg[0]:02d}:00–{seg[1]:02d}:00"))
+            if filas:
+                st.markdown('<div class="section-header">Vista de horario semanal</div>',
+                            unsafe_allow_html=True)
+                df_tl = pd.DataFrame(filas)
+                fig_tl = px.timeline(df_tl, x_start="Inicio", x_end="Fin",
+                                     y="Día", color="Día", text="Bloque",
+                                     color_discrete_sequence=COLORES_BASE)
+                fig_tl.update_yaxes(categoryorder="array", categoryarray=DIAS[::-1])
+                fig_tl.update_traces(textposition="inside", insidetextanchor="middle")
+                fig_tl.update_layout(**CHART, height=320, showlegend=False,
+                                     xaxis={**GRID, "title": "Hora del día"},
+                                     yaxis={**GRID, "title": ""})
+                st.plotly_chart(fig_tl, use_container_width=True)
+
+    # ── MODO B: HORAS RÁPIDAS POR DÍA ─────────────────────────────────────────
+    else:
+        st.caption("Pon cuántas horas planificas trabajar cada día.")
+        st.markdown("**Horas planificadas por día:**")
+        cols_d = st.columns(7)
+        horas_new = {}
+        for i, dia in enumerate(DIAS):
+            with cols_d[i]:
+                horas_new[dia] = st.number_input(
+                    dia[:3], min_value=0.0, max_value=24.0,
+                    value=float(plan_prev["horas"].get(dia, 0.0)), step=0.25,
+                    key=f"plan_{sem_w}_{año_w}_{dia}")
+        total_plan = sum(horas_new.values())
+        c_save, c_tot = st.columns([1, 2])
+        with c_save:
+            if st.button("💾 Guardar plan", type="primary"):
+                save_plan(sem_w, {"horas": horas_new,
+                                  "bloques": plan_prev.get("bloques", {}),
+                                  "modo": "rapido"})
+                st.success(f"Plan de la semana {sem_w} guardado.")
+                st.rerun()
+        with c_tot:
+            st.markdown(f"<br>Total planificado: **{total_plan:.1f}h**",
+                        unsafe_allow_html=True)
+
+    # ── Seguimiento diario plan vs real + MEDIDOR ─────────────────────────────
     planes_all = load_planes()
-    plan_sem   = planes_all.get(sem_w, {})
-    if plan_sem and len(df_all) > 0:
-        st.markdown('<div class="section-header">Seguimiento diario — semana actual</div>',
+    plan_sem_raw = planes_all.get(sem_w, {})
+    if plan_total_h(plan_sem_raw) > 0 and len(df_all) > 0:
+        st.markdown('<div class="section-header">Seguimiento diario — semana seleccionada</div>',
                     unsafe_allow_html=True)
 
         df_sem = df_all[df_all["Semana"] == sem_w] if len(df_all) > 0 else pd.DataFrame()
         rows = []
         for dia in DIAS:
-            p = plan_sem.get(dia, 0.0)
+            p = plan_horas_dia(plan_sem_raw, dia)
             if len(df_sem) > 0 and "Dia" in df_sem.columns:
-                r = df_sem[df_sem["Dia"]==dia]["Horas"].sum()
+                r = df_sem[df_sem["Dia"] == dia]["Horas"].sum()
             else:
                 r = 0.0
             ahorro = round(p - r, 2)
-            registrado = len(df_sem[df_sem["Dia"]==dia]) > 0 if len(df_sem) > 0 and "Dia" in df_sem.columns else False
-            rows.append({"Día":dia,"Plan":p,"Real":round(r,2),
-                          "Ahorro":ahorro,"Registrado":registrado})
+            registrado = (len(df_sem[df_sem["Dia"] == dia]) > 0
+                          if len(df_sem) > 0 and "Dia" in df_sem.columns else False)
+            rows.append({"Día": dia, "Plan": p, "Real": round(r, 2),
+                         "Ahorro": ahorro, "Registrado": registrado})
         dfcomp = pd.DataFrame(rows)
 
-        # KPIs
         tp = dfcomp["Plan"].sum()
         tr = dfcomp["Real"].sum()
         ta = round(tp - tr, 2)
-        dias_con_registro = dfcomp["Registrado"].sum()
+        dias_con_registro = int(dfcomp["Registrado"].sum())
 
-        k1,k2,k3,k4 = st.columns(4)
-        k1.metric("Plan total semana", f"{tp:.1f}h")
-        k2.metric("Real acumulado", f"{tr:.1f}h")
-        k3.metric("Ahorro acumulado", f"{ta:.1f}h",
-                  "Trabajaste menos ✓" if ta>=0 else "Trabajaste más",
-                  delta_color="normal" if ta>=0 else "inverse")
-        k4.metric("Días con registro", f"{dias_con_registro}/7")
+        # --- MEDIDOR / GAUGE de progreso semanal ---
+        col_g, col_k = st.columns([1, 1])
+        with col_g:
+            prog_pct = (tr / tp * 100) if tp > 0 else 0
+            fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=round(tr, 1),
+                number={"suffix": " h", "font": {"color": "#e0e0e0"}},
+                delta={"reference": round(tp, 1), "increasing": {"color": "#A32D2D"},
+                       "decreasing": {"color": "#3B6D11"},
+                       "position": "bottom"},
+                title={"text": f"Progreso: {prog_pct:.0f}% del plan",
+                       "font": {"size": 14, "color": "#aaa"}},
+                gauge={
+                    "axis": {"range": [0, max(tp, tr, 1)], "tickcolor": "#666"},
+                    "bar": {"color": "#185FA5"},
+                    "bgcolor": "rgba(0,0,0,0)",
+                    "borderwidth": 0,
+                    "steps": [
+                        {"range": [0, tp * 0.7], "color": "#2a2a3e"},
+                        {"range": [tp * 0.7, tp], "color": "#3C348940"},
+                    ],
+                    "threshold": {"line": {"color": "#3B6D11", "width": 3},
+                                  "thickness": 0.85, "value": tp}}))
+            fig_gauge.update_layout(**CHART, height=260)
+            st.plotly_chart(fig_gauge, use_container_width=True)
+
+        with col_k:
+            st.markdown("<br>", unsafe_allow_html=True)
+            k1, k2 = st.columns(2)
+            k1.metric("Plan total", f"{tp:.1f}h")
+            k2.metric("Real acum.", f"{tr:.1f}h")
+            k3, k4 = st.columns(2)
+            k3.metric("Ahorro", f"{ta:.1f}h",
+                      "Menos ✓" if ta >= 0 else "Más",
+                      delta_color="normal" if ta >= 0 else "inverse")
+            k4.metric("Días registrados", f"{dias_con_registro}/7")
 
         # Gráfico plan vs real por día
         fig_comp = go.Figure()
         fig_comp.add_trace(go.Bar(name="Plan", x=dfcomp["Día"], y=dfcomp["Plan"],
-                                   marker_color="#3C3489", opacity=0.7,
-                                   text=dfcomp["Plan"].apply(lambda x:f"{x:.1f}h"),
-                                   textposition="outside"))
+                                  marker_color="#3C3489", opacity=0.7,
+                                  text=dfcomp["Plan"].apply(lambda x: f"{x:.1f}h"),
+                                  textposition="outside"))
         fig_comp.add_trace(go.Bar(name="Real", x=dfcomp["Día"], y=dfcomp["Real"],
-                                   marker_color="#185FA5",
-                                   text=dfcomp["Real"].apply(lambda x:f"{x:.1f}h"),
-                                   textposition="outside"))
+                                  marker_color="#185FA5",
+                                  text=dfcomp["Real"].apply(lambda x: f"{x:.1f}h"),
+                                  textposition="outside"))
         fig_comp.update_layout(**CHART, barmode="group", height=300,
-                                xaxis={**GRID}, yaxis={**GRID,"title":"Horas"},
-                                legend=dict(orientation="h",y=1.1))
+                               xaxis={**GRID}, yaxis={**GRID, "title": "Horas"},
+                               legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig_comp, use_container_width=True)
-
-        # Ahorro por día
-        colors = ["#3B6D11" if x>=0 else "#A32D2D" for x in dfcomp["Ahorro"]]
-        fig_ah = go.Figure(go.Bar(
-            x=dfcomp["Día"], y=dfcomp["Ahorro"], marker_color=colors,
-            text=dfcomp["Ahorro"].apply(lambda x:f"{x:+.2f}h"),
-            textposition="outside"))
-        fig_ah.add_hline(y=0, line_color="#888", line_width=1)
-        fig_ah.update_layout(**CHART, height=250,
-                              xaxis={**GRID}, yaxis={**GRID,"title":"Ahorro (h)"},
-                              title=dict(text="Ahorro por día (verde = trabajaste menos de lo planeado)",
-                                         font=dict(size=12,color="#aaa")))
-        st.plotly_chart(fig_ah, use_container_width=True)
 
         # Tabla
         dfcomp["Estado"] = dfcomp.apply(lambda r:
-            f"🟢 -{abs(r['Ahorro']):.2f}h" if r["Ahorro"]>0 else
-            (f"🔴 +{abs(r['Ahorro']):.2f}h extra" if r["Ahorro"]<0 else "⚪ Exacto"),
+            f"🟢 -{abs(r['Ahorro']):.2f}h" if r["Ahorro"] > 0 else
+            (f"🔴 +{abs(r['Ahorro']):.2f}h extra" if r["Ahorro"] < 0 else "⚪ Exacto"),
             axis=1)
-        st.dataframe(dfcomp[["Día","Plan","Real","Estado"]],
+        st.dataframe(dfcomp[["Día", "Plan", "Real", "Estado"]],
                      use_container_width=True, hide_index=True)
 
         # Cierre dominical
@@ -475,6 +651,7 @@ with t_semana:
             st.markdown(f"""
 | Métrica | Valor |
 |---|---|
+| Semana | **{txt_rango}** |
 | Horas planificadas | **{tp:.1f}h** |
 | Horas reales trabajadas | **{tr:.1f}h** |
 | Horas ahorradas | **{ta:.1f}h** |
@@ -486,8 +663,8 @@ with t_semana:
             else:
                 st.warning(f"⚠️ Trabajaste {abs(ta):.1f}h más de lo que planificaste.")
 
-    elif not plan_sem:
-        st.info("Define tu plan de horas arriba y guárdalo para ver el seguimiento.")
+    elif plan_total_h(plan_sem_raw) == 0:
+        st.info("Define tu plan/horario arriba y guárdalo para ver el seguimiento y el medidor.")
 
     # Histórico de semanas
     if len(planes_all) > 1:
@@ -495,28 +672,26 @@ with t_semana:
                     unsafe_allow_html=True)
         hist = []
         for s, plan in sorted(planes_all.items()):
-            tp2 = sum(plan.values())
-            if len(df_all)>0:
-                tr2 = df_all[df_all["Semana"]==s]["Horas"].sum()
-            else:
-                tr2 = 0.0
-            hist.append({"Semana":s,"Plan":tp2,"Real":round(tr2,2),
-                          "Ahorro":round(tp2-tr2,2),
-                          "Efic.":f"{round(tr2/tp2*100,1) if tp2>0 else 0}%"})
+            tp2 = plan_total_h(plan)
+            tr2 = df_all[df_all["Semana"] == s]["Horas"].sum() if len(df_all) > 0 else 0.0
+            _, _, txt_s = rango_semana(s, año_w)
+            hist.append({"Semana": s, "Rango": txt_s, "Plan": tp2, "Real": round(tr2, 2),
+                         "Ahorro": round(tp2 - tr2, 2),
+                         "Efic.": f"{round(tr2/tp2*100,1) if tp2>0 else 0}%"})
         df_hist = pd.DataFrame(hist)
         fig_hist = go.Figure()
-        fig_hist.add_trace(go.Bar(x=df_hist["Semana"],y=df_hist["Plan"],
-                                   name="Plan",marker_color="#3C3489",opacity=0.7))
-        fig_hist.add_trace(go.Bar(x=df_hist["Semana"],y=df_hist["Real"],
-                                   name="Real",marker_color="#185FA5"))
-        fig_hist.add_trace(go.Scatter(x=df_hist["Semana"],y=df_hist["Ahorro"],
-                                       name="Ahorro",mode="lines+markers",
-                                       line=dict(color="#3B6D11",width=2),
-                                       marker=dict(size=7)))
-        fig_hist.update_layout(**CHART,barmode="group",height=280,
-                                xaxis={**GRID,"title":"Semana"},
-                                yaxis={**GRID,"title":"Horas"},
-                                legend=dict(orientation="h",y=1.1))
+        fig_hist.add_trace(go.Bar(x=df_hist["Semana"], y=df_hist["Plan"],
+                                  name="Plan", marker_color="#3C3489", opacity=0.7))
+        fig_hist.add_trace(go.Bar(x=df_hist["Semana"], y=df_hist["Real"],
+                                  name="Real", marker_color="#185FA5"))
+        fig_hist.add_trace(go.Scatter(x=df_hist["Semana"], y=df_hist["Ahorro"],
+                                      name="Ahorro", mode="lines+markers",
+                                      line=dict(color="#3B6D11", width=2),
+                                      marker=dict(size=7)))
+        fig_hist.update_layout(**CHART, barmode="group", height=280,
+                               xaxis={**GRID, "title": "Semana"},
+                               yaxis={**GRID, "title": "Horas"},
+                               legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig_hist, use_container_width=True)
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
@@ -530,13 +705,16 @@ with t_dash:
     else:
         sems  = sorted(df_all["Semana"].unique())
         sem_d = st.selectbox("Semana", sems, index=len(sems)-1, key="sd")
+        _, _, txt_d = rango_semana(sem_d, int(get_now_peru().year))
+        if txt_d:
+            st.caption(f"📅 Semana del {txt_d}")
         dfs   = df_all[df_all["Semana"]==sem_d]
         dfp   = df_all[df_all["Semana"]==sem_d-1] if (sem_d-1) in df_all["Semana"].values else pd.DataFrame()
 
         h_sem  = dfs["Horas"].sum()
         h_prev = dfp["Horas"].sum() if len(dfp)>0 else 0
         delta  = round(h_sem - h_prev, 2)
-        plan_s = sum(planes_all.get(sem_d, {}).values())
+        plan_s = plan_total_h(planes_all.get(sem_d, {}))
 
         k1,k2,k3,k4,k5 = st.columns(5)
         k1.metric("Horas trabajadas", f"{h_sem:.1f}h", f"{delta:+.1f}h vs sem ant.")
@@ -590,10 +768,9 @@ with t_dash:
                                marker_color="#185FA5",
                                text=evo["Horas"].apply(lambda x:f"{x:.1f}h"),
                                textposition="outside"))
-        # Línea de planes si existen
         if planes_all:
             plan_line = pd.DataFrame([
-                {"Semana":s,"Plan":sum(d.values())} for s,d in planes_all.items()])
+                {"Semana":s,"Plan":plan_total_h(d)} for s,d in planes_all.items()])
             fig3.add_trace(go.Scatter(x=plan_line["Semana"],y=plan_line["Plan"],
                                        mode="lines+markers",name="Plan",
                                        line=dict(color="#854F0B",dash="dash",width=2),
@@ -671,7 +848,8 @@ with t_analisis:
         res = df_all.groupby("Semana").agg(
             Horas=("Horas","sum"), Sesiones=("Horas","count"),
             Avg_min=("Minutos","mean")).reset_index()
-        res["Plan"] = res["Semana"].apply(lambda s: f"{sum(planes_all.get(s,{}).values()):.1f}h" if s in planes_all else "—")
+        res["Plan"] = res["Semana"].apply(
+            lambda s: f"{plan_total_h(planes_all.get(s,{})):.1f}h" if s in planes_all else "—")
         res["Horas"]   = res["Horas"].apply(lambda x:f"{x:.1f}h")
         res["Avg_min"] = res["Avg_min"].apply(lambda x:f"{x:.0f} min")
         res.columns    = ["Semana","Horas totales","Sesiones","Avg. sesión","Plan"]
