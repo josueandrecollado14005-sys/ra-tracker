@@ -900,25 +900,28 @@ with t_config:
       st.markdown("""
 **Para activar la sincronización entre dispositivos:**
 
-1. Crea cuenta gratis en [supabase.com](https://supabase.com)
+1. Crea cuenta gratis en supabase.com
 2. Crea un proyecto nuevo
 3. Ve a **SQL Editor** y ejecuta:
-```sql
-create table sessions (
-  id text primary key,
-  "Fecha" text, "Semana" int, "Dia" text,
-  "Proyecto" text, "Tipo" text, "Descripcion" text,
-  "Minutos" float, "Horas" float, "Estado" text,
-  "HoraInicio" text, "HoraFin" text
-);
 
-create table planes (
-  semana int primary key,
-  datos text
-);
+        create table sessions (
+          id text primary key,
+          "Fecha" text, "Semana" int, "Dia" text,
+          "Proyecto" text, "Tipo" text, "Descripcion" text,
+          "Minutos" float, "Horas" float, "Estado" text,
+          "HoraInicio" text, "HoraFin" text
+        );
 
-create table config (
-  clave text primary key,
-  valor text
-);
+        create table planes (
+          semana int primary key,
+          datos text
+        );
+
+        create table config (
+          clave text primary key,
+          valor text
+        );
+
+4. Por seguridad, no crees el archivo secrets en GitHub.
+5. Ve directamente a Streamlit Cloud → Settings → Secrets → y pega ahí tus credenciales.
 """)
