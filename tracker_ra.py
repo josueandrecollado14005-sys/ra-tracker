@@ -897,7 +897,7 @@ with t_config:
         st.success("✅ Conectado a Supabase — datos sincronizados entre dispositivos")
     else:
         st.error("❌ Sin conexión a Supabase — datos solo en esta sesión")
-      st.markdown("""
+        st.markdown("""
 **Para activar la sincronización entre dispositivos:**
 
 1. Crea cuenta gratis en supabase.com
