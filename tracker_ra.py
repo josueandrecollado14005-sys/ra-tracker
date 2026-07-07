@@ -1,9 +1,9 @@
 """
-RA Productivity Tracker — v4
-- Plan semanal personalizado por semana (modo horas rápidas o horario por bloques)
+RA Productivity Tracker — v4.1 (Minutos dinámicos y Fix Plotly)
+- Plan semanal personalizado por semana (modo horas rápidas o horario por bloques exactos)
 - Rango de fechas legible por semana ISO (Semana del X al Y de <mes> de <año>)
-- Horario visual (grilla día × hora) + timeline tipo Gantt del plan
-- Medidor/gauge de progreso semanal (real vs plan)
+- Horario visual (tabla dinámica HH:MM) + timeline tipo Gantt del plan
+- Medidor/gauge de progreso semanal (real vs plan) corregido
 - Comparación diaria plan vs real · Cierre dominical automático
 - Proyectos y tipos de tarea configurables
 - Persistencia en Supabase (funciona en todos los dispositivos)
@@ -42,8 +42,6 @@ def get_now_peru():
 DIAS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
 MESES = ["enero","febrero","marzo","abril","mayo","junio",
          "julio","agosto","septiembre","octubre","noviembre","diciembre"]
-# Franjas horarias de 06:00 a 23:00 (bloques de 1h) para el horario detallado
-FRANJAS = [f"{h:02d}:00" for h in range(6, 24)]
 
 DEFAULT_PROYECTOS   = ["Fintech","MFI","LRC","Otros"]
 DEFAULT_TIPOS       = [
@@ -74,13 +72,12 @@ st.markdown("""<style>
 .week-banner b{color:#B5D4F4;font-size:16px}
 </style>""", unsafe_allow_html=True)
 
-
 # ─── HELPERS DB / SESSION STATE ───────────────────────────────────────────────
 
 def _init_state():
     defaults = {
-        "sessions":    [],    # lista de dicts con registros
-        "planes":      {},    # {semana: {...plan...}}
+        "sessions":    [],    
+        "planes":      {},    
         "proyectos":   list(DEFAULT_PROYECTOS),
         "tipos":       list(DEFAULT_TIPOS),
     }
@@ -89,7 +86,6 @@ def _init_state():
             st.session_state[k] = v
 
 _init_state()
-
 
 # ── Sesiones ──────────────────────────────────────────────────────────────────
 def load_sessions():
@@ -116,7 +112,6 @@ def delete_session(sid):
         except: pass
     st.session_state.sessions = [s for s in st.session_state.sessions if s.get("id") != sid]
 
-
 # ── Planes semanales ──────────────────────────────────────────────────────────
 def load_planes():
     if USE_DB:
@@ -140,18 +135,25 @@ def save_plan(semana: int, datos: dict):
         except: pass
     st.session_state.planes[semana] = datos
 
-
-# ── Normalización de planes (compatibilidad con formato antiguo) ──────────────
-# Formato NUEVO: {"horas": {dia: h}, "bloques": {dia: [[ini,fin],...]}, "modo": "..."}
-# Formato ANTIGUO (legacy): {dia: horas}  (dict plano)
+# ── Normalización de planes ───────────────────────────────────────────────────
 def _norm_plan(plan):
     if not plan:
         return {"horas": {}, "bloques": {}, "modo": "rapido"}
     if isinstance(plan, dict) and "horas" in plan and isinstance(plan.get("horas"), dict):
+        # Transforma bloques legacy (enteros) al nuevo formato ("HH:MM")
+        bloques_raw = plan.get("bloques", {}) or {}
+        bloques_str = {}
+        for d, segs in bloques_raw.items():
+            bloques_str[d] = []
+            for seg in segs:
+                if len(seg) == 2:
+                    ini = f"{int(seg[0]):02d}:00" if isinstance(seg[0], (int, float)) else seg[0]
+                    fin = f"{int(seg[1]):02d}:00" if isinstance(seg[1], (int, float)) else seg[1]
+                    bloques_str[d].append([ini, fin])
+
         return {"horas": plan.get("horas", {}) or {},
-                "bloques": plan.get("bloques", {}) or {},
+                "bloques": bloques_str,
                 "modo": plan.get("modo", "rapido")}
-    # legacy: {dia: horas}
     return {"horas": {k: float(v) for k, v in plan.items() if k in DIAS},
             "bloques": {}, "modo": "rapido"}
 
@@ -161,10 +163,8 @@ def plan_horas_dia(plan, dia):
 def plan_total_h(plan):
     return float(sum(_norm_plan(plan)["horas"].values()))
 
-
 # ── Rango de fechas de una semana ISO ─────────────────────────────────────────
 def rango_semana(sem, year):
-    """Devuelve (lunes, domingo, texto legible en español) o (None,None,'') si es inválida."""
     try:
         lun = date.fromisocalendar(int(year), int(sem), 1)
         dom = date.fromisocalendar(int(year), int(sem), 7)
@@ -179,51 +179,6 @@ def rango_semana(sem, year):
         txt = (f"{lun.day} de {MESES[lun.month-1]} {lun.year} al "
                f"{dom.day} de {MESES[dom.month-1]} {dom.year}")
     return lun, dom, txt
-
-
-# ── Conversión grilla <-> bloques ─────────────────────────────────────────────
-def bloques_a_grid(bloques):
-    """{dia:[[ini,fin]]} -> {dia:{'06:00':bool,...}}"""
-    grid = {dia: {f: False for f in FRANJAS} for dia in DIAS}
-    for dia, segs in (bloques or {}).items():
-        if dia not in grid:
-            continue
-        for seg in segs:
-            try:
-                a, b = int(seg[0]), int(seg[1])
-            except Exception:
-                continue
-            for h in range(a, b):
-                key = f"{h:02d}:00"
-                if key in grid[dia]:
-                    grid[dia][key] = True
-    return grid
-
-def grid_a_bloques(df_grid):
-    """DataFrame(index=FRANJAS, columns=DIAS, bool) -> (bloques, horas_por_dia)"""
-    bloques, horas = {}, {}
-    for dia in DIAS:
-        segs, start, last, cnt = [], None, None, 0
-        for f in FRANJAS:
-            h = int(f[:2])
-            try:
-                on = bool(df_grid.at[f, dia]) if dia in df_grid.columns else False
-            except Exception:
-                on = False
-            if on:
-                cnt += 1
-                if start is None:
-                    start = h
-                last = h
-            else:
-                if start is not None:
-                    segs.append([start, last + 1]); start = None
-        if start is not None:
-            segs.append([start, last + 1])
-        bloques[dia] = segs
-        horas[dia] = float(cnt)   # cada franja marcada = 1 hora
-    return bloques, horas
-
 
 def parse_h(v):
     try: return float(str(v).replace(",","."))
@@ -270,8 +225,7 @@ def sessions_to_df(sessions):
     return df
 
 def is_domingo():
-    return get_now_peru().weekday() == 6   # 0=lun … 6=dom
-
+    return get_now_peru().weekday() == 6
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -356,13 +310,11 @@ t_reg, t_semana, t_dash, t_analisis, t_config = st.tabs([
     "📝 Registro", "📅 Mi semana", "📊 Dashboard", "🔬 Análisis", "⚙️ Configuración"
 ])
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — REGISTRO
 # ══════════════════════════════════════════════════════════════════════════════
 with t_reg:
-    st.markdown('<div class="section-header">Nueva sesión de trabajo</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Nueva sesión de trabajo</div>', unsafe_allow_html=True)
     c1,c2,c3 = st.columns(3)
     with c1:
       fecha    = st.date_input("Fecha", value=get_now_peru().date())
@@ -387,7 +339,7 @@ with t_reg:
     plan_hoy = plan_horas_dia(plan_obj_hoy, dia_sem) if plan_obj_hoy else None
     real_hoy_antes = 0.0
     if len(df_all) > 0 and "Semana" in df_all.columns:
-        real_hoy_antes = df_all[df_all["Semana"]==sem]["Horas"].sum() if len(df_all)>0 else 0
+        real_hoy_antes = float(df_all[df_all["Semana"]==sem]["Horas"].sum()) if len(df_all)>0 else 0.0
 
     ka,kb,kc,kd = st.columns(4)
     ka.metric("Minutos", mins)
@@ -404,7 +356,7 @@ with t_reg:
         if not desc.strip():
             st.warning("Agrega una descripción.")
         elif mins <= 0:
-            st.warning("Hora fin debe ser posterior a inicio.")
+            st.warning("La hora de fin debe ser posterior a la de inicio.")
         else:
             nuevo = {
                 "id":          f"{datetime.now().timestamp()}",
@@ -417,8 +369,8 @@ with t_reg:
                 "Minutos":     mins,
                 "Horas":       horas,
                 "Estado":      estado,
-                "HoraInicio":  str(h_ini),
-                "HoraFin":     str(h_fin),
+                "HoraInicio":  str(h_ini)[:5],
+                "HoraFin":     str(h_fin)[:5],
             }
             save_session(nuevo)
             st.success(f"✅ {horas:.2f}h · {tipo} · {proyecto}")
@@ -427,8 +379,7 @@ with t_reg:
     sessions_all = load_sessions()
     df_all = sessions_to_df(sessions_all)
     if len(df_all) > 0:
-        st.markdown('<div class="section-header">Registros recientes</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Registros recientes</div>', unsafe_allow_html=True)
         sems_disp = sorted(df_all["Semana"].unique(), reverse=True)
         sel = st.selectbox("Filtrar semana", ["Todas"] + [f"Sem {s}" for s in sems_disp])
         dv  = df_all if sel=="Todas" else df_all[df_all["Semana"]==int(sel.split()[1])]
@@ -445,8 +396,7 @@ with t_reg:
 # TAB 2 — MI SEMANA (plan + horario + seguimiento diario)
 # ══════════════════════════════════════════════════════════════════════════════
 with t_semana:
-    st.markdown('<div class="section-header">Define tu plan semanal</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Define tu plan semanal</div>', unsafe_allow_html=True)
 
     col_s, col_y = st.columns([2, 1])
     with col_s:
@@ -472,54 +422,86 @@ with t_semana:
         index=0 if plan_prev.get("modo") == "horario" else 1,
         key="modo_plan")
 
-    # ── MODO A: HORARIO POR BLOQUES (grilla día × hora) ───────────────────────
+    # ── MODO A: HORARIO POR BLOQUES (Dinámico HH:MM) ───────────────────────────
     if modo == "🗓️ Horario por bloques":
-        st.caption("Marca las casillas de las horas que planeas trabajar cada día. "
-                   "Cada casilla = 1 hora. Las horas del día se calculan solas.")
+        st.caption("Añade tus bloques de horario con precisión de minutos (ej. 12:30 a 14:30). "
+                   "Puedes agregar o eliminar filas dinámicamente.")
 
-        grid = bloques_a_grid(plan_prev["bloques"])
-        df_grid = pd.DataFrame(
-            {dia: [grid[dia][f] for f in FRANJAS] for dia in DIAS},
-            index=FRANJAS)
+        filas_bloques = []
+        for dia, segs in plan_prev.get("bloques", {}).items():
+            for seg in segs:
+                filas_bloques.append({"Día": dia, "Inicio": seg[0], "Fin": seg[1]})
 
-        edited = st.data_editor(
-            df_grid, use_container_width=True, height=430,
-            key=f"grid_{sem_w}_{año_w}",
-            column_config={d: st.column_config.CheckboxColumn(d[:3], default=False)
-                           for d in DIAS})
+        if not filas_bloques:
+            filas_bloques.append({"Día": "Lunes", "Inicio": "09:00", "Fin": "11:30"})
 
-        bloques_new, horas_new = grid_a_bloques(edited)
+        df_b = pd.DataFrame(filas_bloques)
+
+        edited_b = st.data_editor(
+            df_b,
+            num_rows="dynamic",
+            column_config={
+                "Día": st.column_config.SelectboxColumn("Día", options=DIAS, required=True),
+                "Inicio": st.column_config.TextColumn("Hora Inicio (24h)", required=True, validate="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$"),
+                "Fin": st.column_config.TextColumn("Hora Fin (24h)", required=True, validate="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$"),
+            },
+            use_container_width=True,
+            key=f"editor_bloques_{sem_w}_{año_w}"
+        )
+
+        bloques_new = {d: [] for d in DIAS}
+        horas_new = {d: 0.0 for d in DIAS}
+
+        for _, row in edited_b.iterrows():
+            d = row.get("Día")
+            ini_str = str(row.get("Inicio", "")).strip()
+            fin_str = str(row.get("Fin", "")).strip()
+            
+            if d in DIAS and ini_str and fin_str:
+                try:
+                    h_i, m_i = map(int, ini_str.split(":"))
+                    h_f, m_f = map(int, fin_str.split(":"))
+                    dur = (h_f + m_f/60.0) - (h_i + m_i/60.0)
+                    if dur > 0:
+                        bloques_new[d].append([ini_str, fin_str])
+                        horas_new[d] += dur
+                except Exception:
+                    pass
+
         total_plan = sum(horas_new.values())
 
         c_save, c_tot = st.columns([1, 2])
         with c_save:
             if st.button("💾 Guardar horario", type="primary"):
-                save_plan(sem_w, {"horas": horas_new, "bloques": bloques_new,
-                                  "modo": "horario"})
+                save_plan(sem_w, {"horas": horas_new, "bloques": bloques_new, "modo": "horario"})
                 st.success(f"Horario de la semana {sem_w} guardado.")
                 st.rerun()
         with c_tot:
-            resumen = " · ".join(f"{d[:3]} {int(horas_new[d])}h"
-                                 for d in DIAS if horas_new[d] > 0) or "sin horas marcadas"
-            st.markdown(f"<br>Total planificado: **{total_plan:.1f}h**  \n"
+            resumen = " · ".join(f"{d[:3]} {horas_new[d]:.1f}h" for d in DIAS if horas_new[d] > 0) or "sin horas configuradas"
+            st.markdown(f"<br>Total planificado: **{total_plan:.1f}h** \n"
                         f"<span style='color:#999;font-size:12px'>{resumen}</span>",
                         unsafe_allow_html=True)
 
-        # Timeline tipo Gantt del horario planificado (el "horario como tal")
+        # Timeline tipo Gantt adaptado a minutos
         if total_plan > 0 and lun_w is not None:
             filas = []
             for i, dia in enumerate(DIAS):
                 fecha_dia = lun_w + timedelta(days=i)
                 base = datetime.combine(fecha_dia, time(0, 0))
                 for seg in bloques_new.get(dia, []):
-                    filas.append(dict(
-                        Día=dia,
-                        Inicio=base + timedelta(hours=seg[0]),
-                        Fin=base + timedelta(hours=seg[1]),
-                        Bloque=f"{seg[0]:02d}:00–{seg[1]:02d}:00"))
+                    try:
+                        hi, mi = map(int, seg[0].split(":"))
+                        hf, mf = map(int, seg[1].split(":"))
+                        filas.append(dict(
+                            Día=dia,
+                            Inicio=base + timedelta(hours=hi, minutes=mi),
+                            Fin=base + timedelta(hours=hf, minutes=mf),
+                            Bloque=f"{seg[0]}–{seg[1]}"))
+                    except Exception:
+                        pass
+
             if filas:
-                st.markdown('<div class="section-header">Vista de horario semanal</div>',
-                            unsafe_allow_html=True)
+                st.markdown('<div class="section-header">Vista de horario semanal</div>', unsafe_allow_html=True)
                 df_tl = pd.DataFrame(filas)
                 fig_tl = px.timeline(df_tl, x_start="Inicio", x_end="Fin",
                                      y="Día", color="Día", text="Bloque",
@@ -544,6 +526,7 @@ with t_semana:
                     value=float(plan_prev["horas"].get(dia, 0.0)), step=0.25,
                     key=f"plan_{sem_w}_{año_w}_{dia}")
         total_plan = sum(horas_new.values())
+        
         c_save, c_tot = st.columns([1, 2])
         with c_save:
             if st.button("💾 Guardar plan", type="primary"):
@@ -553,15 +536,13 @@ with t_semana:
                 st.success(f"Plan de la semana {sem_w} guardado.")
                 st.rerun()
         with c_tot:
-            st.markdown(f"<br>Total planificado: **{total_plan:.1f}h**",
-                        unsafe_allow_html=True)
+            st.markdown(f"<br>Total planificado: **{total_plan:.1f}h**", unsafe_allow_html=True)
 
     # ── Seguimiento diario plan vs real + MEDIDOR ─────────────────────────────
     planes_all = load_planes()
     plan_sem_raw = planes_all.get(sem_w, {})
     if plan_total_h(plan_sem_raw) > 0 and len(df_all) > 0:
-        st.markdown('<div class="section-header">Seguimiento diario — semana seleccionada</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Seguimiento diario — semana seleccionada</div>', unsafe_allow_html=True)
 
         df_sem = df_all[df_all["Semana"] == sem_w] if len(df_all) > 0 else pd.DataFrame()
         rows = []
@@ -578,15 +559,33 @@ with t_semana:
                          "Ahorro": ahorro, "Registrado": registrado})
         dfcomp = pd.DataFrame(rows)
 
-        tp = dfcomp["Plan"].sum()
-        tr = dfcomp["Real"].sum()
+        # FIX PLOTLY: Forzamos conversiones a flotantes de Python (no numpy types)
+        tp = float(dfcomp["Plan"].sum())
+        tr = float(dfcomp["Real"].sum())
         ta = round(tp - tr, 2)
         dias_con_registro = int(dfcomp["Registrado"].sum())
 
-        # --- MEDIDOR / GAUGE de progreso semanal ---
         col_g, col_k = st.columns([1, 1])
         with col_g:
             prog_pct = (tr / tp * 100) if tp > 0 else 0
+            
+            # Gauge condicional: protege contra anchos de barra cero si tp es 0
+            gauge_dict = {
+                "axis": {"range": [0, max(tp, tr, 1)], "tickcolor": "#666"},
+                "bar": {"color": "#185FA5"},
+                "bgcolor": "rgba(0,0,0,0)",
+                "borderwidth": 0
+            }
+            if tp > 0:
+                gauge_dict["steps"] = [
+                    {"range": [0, tp * 0.7], "color": "#2a2a3e"},
+                    {"range": [tp * 0.7, tp], "color": "#3C348940"}
+                ]
+                gauge_dict["threshold"] = {
+                    "line": {"color": "#3B6D11", "width": 3},
+                    "thickness": 0.85, "value": tp
+                }
+
             fig_gauge = go.Figure(go.Indicator(
                 mode="gauge+number+delta",
                 value=round(tr, 1),
@@ -596,17 +595,8 @@ with t_semana:
                        "position": "bottom"},
                 title={"text": f"Progreso: {prog_pct:.0f}% del plan",
                        "font": {"size": 14, "color": "#aaa"}},
-                gauge={
-                    "axis": {"range": [0, max(tp, tr, 1)], "tickcolor": "#666"},
-                    "bar": {"color": "#185FA5"},
-                    "bgcolor": "rgba(0,0,0,0)",
-                    "borderwidth": 0,
-                    "steps": [
-                        {"range": [0, tp * 0.7], "color": "#2a2a3e"},
-                        {"range": [tp * 0.7, tp], "color": "#3C348940"},
-                    ],
-                    "threshold": {"line": {"color": "#3B6D11", "width": 3},
-                                  "thickness": 0.85, "value": tp}}))
+                gauge=gauge_dict
+            ))
             fig_gauge.update_layout(**CHART, height=260)
             st.plotly_chart(fig_gauge, use_container_width=True)
 
@@ -621,7 +611,6 @@ with t_semana:
                       delta_color="normal" if ta >= 0 else "inverse")
             k4.metric("Días registrados", f"{dias_con_registro}/7")
 
-        # Gráfico plan vs real por día
         fig_comp = go.Figure()
         fig_comp.add_trace(go.Bar(name="Plan", x=dfcomp["Día"], y=dfcomp["Plan"],
                                   marker_color="#3C3489", opacity=0.7,
@@ -636,7 +625,6 @@ with t_semana:
                                legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig_comp, use_container_width=True)
 
-        # Tabla
         dfcomp["Estado"] = dfcomp.apply(lambda r:
             f"🟢 -{abs(r['Ahorro']):.2f}h" if r["Ahorro"] > 0 else
             (f"🔴 +{abs(r['Ahorro']):.2f}h extra" if r["Ahorro"] < 0 else "⚪ Exacto"),
@@ -644,10 +632,8 @@ with t_semana:
         st.dataframe(dfcomp[["Día", "Plan", "Real", "Estado"]],
                      use_container_width=True, hide_index=True)
 
-        # Cierre dominical
         if is_domingo() or st.checkbox("👀 Ver cierre de semana (resumen final)", key="cierre"):
-            st.markdown('<div class="section-header">🏁 Cierre semanal</div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="section-header">🏁 Cierre semanal</div>', unsafe_allow_html=True)
             st.markdown(f"""
 | Métrica | Valor |
 |---|---|
@@ -666,10 +652,8 @@ with t_semana:
     elif plan_total_h(plan_sem_raw) == 0:
         st.info("Define tu plan/horario arriba y guárdalo para ver el seguimiento y el medidor.")
 
-    # Histórico de semanas
     if len(planes_all) > 1:
-        st.markdown('<div class="section-header">Histórico de semanas</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Histórico de semanas</div>', unsafe_allow_html=True)
         hist = []
         for s, plan in sorted(planes_all.items()):
             tp2 = plan_total_h(plan)
@@ -736,8 +720,7 @@ with t_dash:
 
         cl,cr = st.columns(2)
         with cl:
-            st.markdown('<div class="section-header">Por tipo de tarea</div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="section-header">Por tipo de tarea</div>', unsafe_allow_html=True)
             if "Tipo" in dfs.columns:
                 td = dfs.groupby("Tipo")["Horas"].sum().reset_index().sort_values("Horas")
                 cmap = {t: color_for(i) for i,t in enumerate(td["Tipo"].unique())}
@@ -749,8 +732,7 @@ with t_dash:
                 st.plotly_chart(fig,use_container_width=True)
 
         with cr:
-            st.markdown('<div class="section-header">Por proyecto</div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="section-header">Por proyecto</div>', unsafe_allow_html=True)
             if "Proyecto" in dfs.columns:
                 pd2 = dfs.groupby("Proyecto")["Horas"].sum().reset_index()
                 cmap2 = {p: color_for(i) for i,p in enumerate(pd2["Proyecto"].unique())}
@@ -760,8 +742,7 @@ with t_dash:
                 fig2.update_layout(**CHART,height=280,showlegend=False)
                 st.plotly_chart(fig2,use_container_width=True)
 
-        st.markdown('<div class="section-header">Evolución semanal</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Evolución semanal</div>', unsafe_allow_html=True)
         evo = df_all.groupby("Semana")["Horas"].sum().reset_index()
         fig3 = go.Figure()
         fig3.add_trace(go.Bar(x=evo["Semana"],y=evo["Horas"],name="Horas",
@@ -790,8 +771,7 @@ with t_analisis:
     else:
         dfhb = df_all[df_all.get("HoraInicio","").notna()].copy() if "HoraInicio" in df_all.columns else pd.DataFrame()
         if len(dfhb)>0:
-            st.markdown('<div class="section-header">Por bloque horario</div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="section-header">Por bloque horario</div>', unsafe_allow_html=True)
             dfhb["Bloque"] = dfhb["HoraInicio"].apply(bloque)
             orden = ["Madrugada (<9h)","Mañana (9–13h)","Tarde (13–17h)",
                      "Noche (17–21h)","Noche tarde (21h+)"]
@@ -805,8 +785,7 @@ with t_analisis:
 
         ca,cb = st.columns(2)
         with ca:
-            st.markdown('<div class="section-header">Duración media por tipo</div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="section-header">Duración media por tipo</div>', unsafe_allow_html=True)
             if "Tipo" in df_all.columns:
                 at = df_all.groupby("Tipo")["Minutos"].mean().reset_index()
                 at = at.sort_values("Minutos")
@@ -820,8 +799,7 @@ with t_analisis:
                 st.plotly_chart(fat,use_container_width=True)
 
         with cb:
-            st.markdown('<div class="section-header">Estado de tareas</div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="section-header">Estado de tareas</div>', unsafe_allow_html=True)
             if "Estado" in df_all.columns:
                 est = df_all.groupby("Estado")["Horas"].sum().reset_index()
                 cmap4 = {"Terminado":"#3B6D11","En Proceso":"#185FA5","Bloqueado":"#A32D2D"}
@@ -832,8 +810,7 @@ with t_analisis:
                                    xaxis={**GRID},yaxis={**GRID,"title":"Horas"})
                 st.plotly_chart(fe2,use_container_width=True)
 
-        st.markdown('<div class="section-header">Heatmap semana × tipo</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Heatmap semana × tipo</div>', unsafe_allow_html=True)
         if "Tipo" in df_all.columns:
             pivot = df_all.pivot_table(index="Tipo",columns="Semana",
                                         values="Horas",aggfunc="sum",fill_value=0)
@@ -843,8 +820,7 @@ with t_analisis:
             fhm.update_layout(**CHART,height=300)
             st.plotly_chart(fhm,use_container_width=True)
 
-        st.markdown('<div class="section-header">Resumen por semana</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="section-header">Resumen por semana</div>', unsafe_allow_html=True)
         res = df_all.groupby("Semana").agg(
             Horas=("Horas","sum"), Sesiones=("Horas","count"),
             Avg_min=("Minutos","mean")).reset_index()
@@ -945,11 +921,3 @@ create table config (
   clave text primary key,
   valor text
 );
-```
-4. En tu repo de GitHub, crea `.streamlit/secrets.toml`:
-```toml
-SUPABASE_URL = "https://xxxx.supabase.co"
-SUPABASE_KEY = "tu-anon-key"
-```
-5. En Streamlit Cloud → Settings → Secrets → pega lo mismo
-""")
