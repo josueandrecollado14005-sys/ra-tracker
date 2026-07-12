@@ -28,11 +28,9 @@ def get_supabase():
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
-    except Exception:
+    except Exception as e:
+        st.error(f"⚠️ Error detallado de Supabase: {e}")
         return None
-
-sb = get_supabase()
-USE_DB = sb is not None
 
 # ─── CONSTANTES ───────────────────────────────────────────────────────────────
 def get_now_peru():
