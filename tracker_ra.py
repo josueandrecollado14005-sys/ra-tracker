@@ -21,6 +21,7 @@ st.set_page_config(page_title="RA Tracker", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
 
 # ─── SUPABASE ────────────────────────────────────────────────────────────────
+# ─── SUPABASE ────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_supabase():
     try:
@@ -31,6 +32,9 @@ def get_supabase():
     except Exception as e:
         st.error(f"⚠️ Error detallado de Supabase: {e}")
         return None
+
+sb = get_supabase()
+USE_DB = sb is not None
 
 # ─── CONSTANTES ───────────────────────────────────────────────────────────────
 def get_now_peru():
