@@ -385,25 +385,29 @@ with t_reg:
         sems_disp = sorted(df_all["Semana"].unique(), reverse=True)
         sel = st.selectbox("Filtrar semana", ["Todas"] + [f"Sem {s}" for s in sems_disp])
         
-        # 1. Hacemos una copia para poder manipular las columnas de forma segura
+        # 1. Hacemos una copia
         dv = df_all.copy() if sel=="Todas" else df_all[df_all["Semana"]==int(sel.split()[1])].copy()
         
-        # 2. Creamos la nueva columna "Intervalo"
+        # 2. Creamos la nueva columna "Intervalo" quitando los segundos (solo los primeros 5 caracteres)
         if "HoraInicio" in dv.columns and "HoraFin" in dv.columns:
-            dv["Intervalo"] = dv["HoraInicio"].fillna("").astype(str) + " - " + dv["HoraFin"].fillna("").astype(str)
+            dv["Intervalo"] = dv["HoraInicio"].fillna("").astype(str).str[:5] + " - " + dv["HoraFin"].fillna("").astype(str).str[:5]
         else:
             dv["Intervalo"] = "—"
             
-        # 3. Agregamos "Intervalo" a la lista de columnas (justo después de "Dia")
+        # 3. Quitamos "Estado" de la lista y ordenamos
         show_cols = [c for c in ["Fecha","Semana","Dia","Intervalo","Proyecto","Tipo",
-                                  "Descripcion","Minutos","Horas","Estado"] if c in dv.columns]
+                                  "Descripcion","Minutos","Horas"] if c in dv.columns]
                                   
         dv2 = dv[show_cols].copy()
         if "Horas"   in dv2.columns: dv2["Horas"]   = dv2["Horas"].apply(lambda x:f"{x:.2f}h")
         if "Minutos" in dv2.columns: dv2["Minutos"] = dv2["Minutos"].apply(lambda x:f"{int(x)} min")
         
+        # 4. Ajustamos el ancho de la columna Intervalo y dibujamos la tabla
         st.dataframe(dv2, use_container_width=True, height=320,
-                     column_config={"Descripcion": st.column_config.TextColumn("Descripción",width="large")})
+                     column_config={
+                         "Descripcion": st.column_config.TextColumn("Descripción", width="large"),
+                         "Intervalo": st.column_config.TextColumn("Intervalo", width="medium")
+                     })
 
 
 # ══════════════════════════════════════════════════════════════════════════════
