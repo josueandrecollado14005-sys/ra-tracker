@@ -384,12 +384,24 @@ with t_reg:
         st.markdown('<div class="section-header">Registros recientes</div>', unsafe_allow_html=True)
         sems_disp = sorted(df_all["Semana"].unique(), reverse=True)
         sel = st.selectbox("Filtrar semana", ["Todas"] + [f"Sem {s}" for s in sems_disp])
-        dv  = df_all if sel=="Todas" else df_all[df_all["Semana"]==int(sel.split()[1])]
-        show_cols = [c for c in ["Fecha","Semana","Dia","Proyecto","Tipo",
+        
+        # 1. Hacemos una copia para poder manipular las columnas de forma segura
+        dv = df_all.copy() if sel=="Todas" else df_all[df_all["Semana"]==int(sel.split()[1])].copy()
+        
+        # 2. Creamos la nueva columna "Intervalo"
+        if "HoraInicio" in dv.columns and "HoraFin" in dv.columns:
+            dv["Intervalo"] = dv["HoraInicio"].fillna("").astype(str) + " - " + dv["HoraFin"].fillna("").astype(str)
+        else:
+            dv["Intervalo"] = "—"
+            
+        # 3. Agregamos "Intervalo" a la lista de columnas (justo después de "Dia")
+        show_cols = [c for c in ["Fecha","Semana","Dia","Intervalo","Proyecto","Tipo",
                                   "Descripcion","Minutos","Horas","Estado"] if c in dv.columns]
+                                  
         dv2 = dv[show_cols].copy()
         if "Horas"   in dv2.columns: dv2["Horas"]   = dv2["Horas"].apply(lambda x:f"{x:.2f}h")
         if "Minutos" in dv2.columns: dv2["Minutos"] = dv2["Minutos"].apply(lambda x:f"{int(x)} min")
+        
         st.dataframe(dv2, use_container_width=True, height=320,
                      column_config={"Descripcion": st.column_config.TextColumn("Descripción",width="large")})
 
