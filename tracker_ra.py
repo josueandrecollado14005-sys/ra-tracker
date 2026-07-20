@@ -321,7 +321,8 @@ with t_reg:
     with c1:
       fecha    = st.date_input("Fecha", value=get_now_peru().date())
       proyecto = st.selectbox("Proyecto", proyectos)
-      dia_sem  = st.selectbox("Día", DIAS, index=min(get_now_peru().weekday(), 6))
+      # Ahora el índice lee automáticamente el día de la 'fecha' seleccionada
+      dia_sem  = st.selectbox("Día", DIAS, index=fecha.weekday())
     with c2:
         tipo   = st.selectbox("Tipo de tarea", tipos)
         estado = st.selectbox("Estado", ["Terminado","En Proceso","Bloqueado"])
