@@ -386,8 +386,12 @@ with t_reg:
         sems_disp = sorted(df_all["Semana"].unique(), reverse=True)
         sel = st.selectbox("Filtrar semana", ["Todas"] + [f"Sem {s}" for s in sems_disp])
         
-        # 1. Hacemos una copia
+       # 1. Hacemos una copia
         dv = df_all.copy() if sel=="Todas" else df_all[df_all["Semana"]==int(sel.split()[1])].copy()
+        
+        # ---> NUEVO: Forzar orden cronológico usando el ID <---
+        if "id" in dv.columns:
+            dv = dv.sort_values("id").reset_index(drop=True)
         
         # 2. Creamos la nueva columna "Intervalo" quitando los segundos (solo los primeros 5 caracteres)
         if "HoraInicio" in dv.columns and "HoraFin" in dv.columns:
